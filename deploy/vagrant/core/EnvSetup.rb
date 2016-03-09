@@ -19,44 +19,69 @@ def validate_provider(provider)
       return
     end
 
-    raise "\nMISMATCH FOUND\nProvider in init.yml is #{provider}." + 
-          "\nBut vagrant provider is #{current_provider}." 
+    raise "\nMISMATCH FOUND\nProvider in init.yml is #{provider}." +
+          "\nBut vagrant provider is #{current_provider}."
   end
 end
 
 
 require 'yaml'
 
-# parse tachyon_version.yml
-class TachyonVersion
+# parse zookeeper.yml
+class ZookeeperVersion
   def initialize(yaml_path)
-    puts 'parsing tachyon_version.yml'
+    puts 'parsing zookeeper.yml'
+    @yml = YAML.load_file(yaml_path)
+
+    @type = @yml['Type']
+    @dist = ''
+    case @type
+    when "Release"
+      @version = @yml['Release']['Version']
+      puts "using zookeeper version #{@version}"
+    when "None"
+      puts 'No zookeeper will be set up'
+    else
+      puts "Unknown Type"
+      exit(1)
+    end
+  end
+
+  def type
+    return @type
+  end
+
+  def version
+    return @version
+  end
+end
+
+# parse alluxio_version.yml
+class AlluxioVersion
+  def initialize(yaml_path)
+    puts 'parsing alluxio_version.yml'
     @yml = YAML.load_file(yaml_path)
 
     @type = @yml['Type']
     @repo = ''
     @version = ''
-    @dist = ''
     case @type
     when "Local"
-      puts 'using local tachyon dir'
+      puts 'using local alluxio dir'
     when "Github"
       @repo = @yml['Github']['Repo']
       @version = @yml['Github']['Version']
       puts "using github #{@repo}, version #{@version}"
     when "Release"
-      @dist = @yml['Release']['Dist']
-      puts "using tachyon dist #{@dist}"
+      @version = @yml['Release']['Version']
+      puts "using alluxio version #{@version}"
     else
       puts "Unknown VersionType"
       exit(1)
     end
 
     @mem = @yml['WorkerMemory']
-  end
-
-  def dist
-    return @dist
+    @masters = @yml['Masters']
   end
 
   def type
@@ -69,6 +94,55 @@ class TachyonVersion
 
   def memory
     return @mem
+  end
+
+  def masters
+    return @masters
+  end
+end
+
+# parse mesos_version.yml
+class MesosVersion
+  def initialize(yaml_path)
+    puts 'parsing mesos_version.yml'
+    @yml = YAML.load_file(yaml_path)
+
+    @type = @yml['Type']
+    @repo = ''
+    @version = ''
+    @dist = ''
+    @use_mesos = true
+    case @type
+    when "Github"
+      @repo = @yml['Github']['Repo']
+      @version = @yml['Github']['Version']
+      puts "using github #{@repo}, version #{@version}"
+    when "Release"
+      @dist = @yml['Release']['Dist']
+      puts "using mesos dist #{@dist}"
+    when "None"
+      puts 'No Mesos will be set up'
+      @use_mesos = false
+    else
+      puts "Unknown VersionType"
+      exit(1)
+    end
+  end
+
+  def dist
+    return @dist
+  end
+
+  def type
+    return @type
+  end
+
+  def use_mesos
+    return @use_mesos
+  end
+
+  def repo_version
+    return @repo, @version
   end
 end
 
@@ -125,13 +199,6 @@ end
 
 class HadoopVersion
   def initialize(yml)
-    apache_url = "http://archive.apache.org/dist/hadoop/common/hadoop-%{Version}/hadoop-%{Version}.tar.gz"
-    cdh_url = "https://repository.cloudera.com/cloudera/cloudera-repos/org/apache/hadoop/hadoop-dist/%{Version}/hadoop-dist-%{Version}.tar.gz"
-    @url_template = {
-      "apache" => apache_url,
-      "cdh"    => cdh_url,
-    }
-
     @type = ''
     @version = ''
     @spark_profile = ''
@@ -149,6 +216,18 @@ class HadoopVersion
       exit(1)
     end
     @spark_profile = yml['SparkProfile'] or @spark_profile
+
+    apache_url = "http://archive.apache.org/dist/hadoop/common/hadoop-%{Version}/hadoop-%{Version}.tar.gz"
+    cdh_url = "https://repository.cloudera.com/cloudera/cloudera-repos/org/apache/hadoop/hadoop-dist/%{Version}/hadoop-dist-%{Version}.tar.gz"
+    # cdh repository is different for cdh5
+    if @version.include?('cdh5')
+      cdh_url = "https://archive.cloudera.com/cdh5/cdh/5/hadoop-%{Version}.tar.gz"
+    end
+    @url_template = {
+      "apache" => apache_url,
+      "cdh"    => cdh_url,
+    }
+
   end
 
   def tarball_url
@@ -165,6 +244,42 @@ class HadoopVersion
 
   def spark_profile
     return @spark_profile
+  end
+
+  def alluxio_dist(alluxio_version)
+    # compute the alluxio distribution string
+    errmsg = "ERROR: hadoop #{@type}-#{@version} does not have a " \
+             "corresponding alluxio distribution"
+    if @type == 'apache'
+      if @version.start_with?('1')
+        # It's the release distribution, so no suffix
+        suffix = ''
+      elsif @version.start_with?('2.4')
+        suffix = 'hadoop2.4'
+      elsif @version.start_with?('2.6')
+        suffix = 'hadoop2.6'
+      else
+        puts errmsg
+        exit(1)
+      end
+    elsif @type == 'cdh'
+      if @version.start_with?('2') and @version.include?('cdh4')
+        suffix = 'cdh4'
+      elsif @version.start_with?('2') and @version.include?('cdh5')
+        suffix = 'cdh5'
+      else
+        puts errmsg
+        exit(1)
+      end
+    else
+      puts "Unknown hadoop type #{@type}"
+      exit(1)
+    end
+    if suffix.empty?
+      return "alluxio-#{alluxio_version}-bin.tar.gz"
+    else
+      return "alluxio-#{alluxio_version}-#{suffix}-bin.tar.gz"
+    end
   end
 end
 
@@ -183,14 +298,14 @@ class S3Version
       puts 'ERROR: S3:Bucket is not set'
       exit(1)
     end
-    @id = ENV['AWS_ACCESS_KEY']
+    @id = ENV['AWS_ACCESS_KEY_ID']
     if @id == nil
-      puts 'ERROR: AWS_ACCESS_KEY needs to be set as environment variable'
+      puts 'ERROR: AWS_ACCESS_KEY_ID needs to be set as environment variable'
       exit(1)
     end
-    @key = ENV['AWS_SECRET_KEY']
+    @key = ENV['AWS_SECRET_ACCESS_KEY']
     if @key == nil
-      puts 'ERROR: AWS_SECRET_KEY needs to be set as environment variable'
+      puts 'ERROR: AWS_SECRET_ACCESS_KEY needs to be set as environment variable'
       exit(1)
     end
   end
@@ -206,11 +321,32 @@ class S3Version
   def bucket
     return @bucket
   end
+
+  def alluxio_dist(alluxio_version)
+    # The base version should work for S3
+    return "alluxio-#{alluxio_version}-bin.tar.gz"
+  end
 end
 
 class UfsVersion
-  def initialize(yaml_path)
+  def get_default_ufs(provider)
+    case provider
+    when 'vb'
+      puts 'use hadoop2 as default ufs'
+      return 'hadoop2'
+    when 'aws'
+      puts 'use s3 as default ufs'
+      return 's3'
+    else
+      return ''
+    end
+  end
+
+  def initialize(yaml_path, provider)
     @yml = YAML.load_file(yaml_path)
+    if @yml['Type'] == nil
+      @yml['Type'] = get_default_ufs(provider)
+    end
     puts @yml
 
     @hadoop = HadoopVersion.new(nil)
@@ -238,5 +374,20 @@ class UfsVersion
 
   def s3
     return @s3
+  end
+
+  def alluxio_dist(alluxio_version)
+    case @yml['Type']
+    when 'hadoop1', 'hadoop2'
+      return @hadoop.alluxio_dist(alluxio_version)
+    when 's3'
+      return @s3.alluxio_dist(alluxio_version)
+    when 'glusterfs'
+    # The base version should work for glusterfs
+      return "alluxio-#{alluxio_version}-bin.tar.gz"
+    else
+      puts 'unsupported ufs'
+      exit(1)
+    end
   end
 end
